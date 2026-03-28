@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Стандартные Android цвета -->
+    <color name="purple_500">#6200EE</color>
+    <color name="purple_700">#3700B3</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="teal_200">#03DAC5</color>
+    <color name="teal_700">#018786</color>
+    
+    <!-- Цвета приложения -->
+    <color name="background">#1e1f22</color>
+    <color name="bg_primary">#1e1f22</color>
+    <color name="bg_secondary">#2b2d31</color>
+    <color name="user_message">#f0f0f0</color>
+    <color name="assistant_message">#fee1cf</color>
+    <color name="accent">#8B8B83</color>
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_hint">#888888</color>
+    <color name="border">#3b3f45</color>
+</resources>

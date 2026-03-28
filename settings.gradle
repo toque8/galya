@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+        maven { url "https://chaquo.com/maven" }
+    }
+    plugins {
+        id 'com.android.application' version '8.5.2' apply false
+        id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
+        id 'com.chaquo.python' version '16.0.0' apply false
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://chaquo.com/maven" }
+    }
+}
+rootProject.name = "GalyaAndroid"
+include ':app'
+project(':app').projectDir = new File('galya/app')
