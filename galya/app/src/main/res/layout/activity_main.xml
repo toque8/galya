@@ -31,18 +31,17 @@
         android:background="@drawable/bg_input"
         android:textColor="#FFFFFF"
         android:textColorHint="#888888"
-        android:hint="..."
+        android:hint=""
+        android:textCursorDrawable="@drawable/cursor_color"
         app:layout_constraintBottom_toTopOf="@id/buttonContainer"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"/>
 
-    <LinearLayout
+    <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/buttonContainer"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
         android:padding="8dp"
-        android:gravity="center"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
@@ -56,28 +55,39 @@
             android:padding="12dp"
             android:scaleType="fitCenter"
             android:contentDescription="Микрофон"
-            app:backgroundTint="@null"/>
+            app:backgroundTint="@null"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"/>
 
-        <Button
+        <ImageButton
             android:id="@+id/buttonSend"
-            android:layout_width="0dp"
+            android:layout_width="48dp"
             android:layout_height="48dp"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:layout_marginEnd="8dp"
-            android:text="ОТПРАВИТЬ"
+            android:src="@drawable/ic_send"
             android:background="@drawable/bg_button"
-            android:textColor="#FFFFFF"
-            app:backgroundTint="@null"/>
+            android:padding="12dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="Отправить"
+            app:backgroundTint="@null"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"/>
 
-        <Button
+        <ImageButton
             android:id="@+id/buttonAttach"
-            android:layout_width="0dp"
+            android:layout_width="48dp"
             android:layout_height="48dp"
-            android:layout_weight="1"
-            android:text="ФАЙЛ"
+            android:src="@drawable/ic_attach"
             android:background="@drawable/bg_button"
-            android:textColor="#FFFFFF"
-            app:backgroundTint="@null"/>
-    </LinearLayout>
+            android:padding="12dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="Файл"
+            app:backgroundTint="@null"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"/>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.constraintlayout.widget.ConstraintLayout>

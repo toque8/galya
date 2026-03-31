@@ -1,6 +1,10 @@
 package com.example.galya
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -8,7 +12,6 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.Toast
-import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -23,8 +26,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var recyclerView: RecyclerView
     private lateinit var editText: EditText
-    private lateinit var sendButton: Button
-    private lateinit var attachButton: Button
+    private lateinit var sendButton: ImageButton
+    private lateinit var attachButton: ImageButton
     private lateinit var micButton: ImageButton
     private lateinit var adapter: ChatAdapter
     private val messages = mutableListOf<Message>()
@@ -47,21 +50,28 @@ class MainActivity : AppCompatActivity() {
     private val fileLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let {
             try {
-                val fileName = it.path?.substringAfterLast('/') ?: "file"
+                val fileName = getFileName(it) ?: "file"
                 val mimeType = contentResolver.getType(it)
-                
+
                 if (mimeType?.startsWith("image/") == true) {
-                    Toast.makeText(this, "📷 Фото: $fileName", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "📷 Обрабатываю фото: $fileName", Toast.LENGTH_SHORT).show()
                     bridge?.sendImage(it.toString(), "")
                 } else {
-                    // Документы и другие файлы
-                    Toast.makeText(this, "📎 Файл: $fileName", Toast.LENGTH_SHORT).show()
-                    // Отправляем как текст с путём
-                    editText.setText("📎 Файл: $fileName")
-                    sendMessage()                }
+                    // Для текстовых файлов читаем содержимое
+                    Toast.makeText(this, "📎 Читаю файл: $fileName", Toast.LENGTH_SHORT).show()
+                    val inputStream = contentResolver.openInputStream(it)
+                    if (inputStream != null) {
+                        val content = inputStream.bufferedReader().use { reader -> reader.readText() }
+                        bridge?.sendTextFile(fileName, content)
+                        inputStream.close()
+                    } else {
+                        Toast.makeText(this, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
+                    }
+                }
             } catch (e: Exception) {
                 Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
                 voice.playError()
+                e.printStackTrace()
             }
         }
     }
@@ -87,11 +97,15 @@ class MainActivity : AppCompatActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 val permissions = mutableListOf(
                     Manifest.permission.RECORD_AUDIO,
-                    Manifest.permission.MODIFY_AUDIO_SETTINGS
+                    Manifest.permission.MODIFY_AUDIO_SETTINGS,
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
                 )
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                    permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                    permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                // Для Android 13+ добавляем медиа-разрешения
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
+                    permissions.add(Manifest.permission.READ_MEDIA_AUDIO)
+                    permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
                 }
                 val missing = permissions.filter {
                     ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -110,7 +124,7 @@ class MainActivity : AppCompatActivity() {
             if (!Python.isStarted()) {
                 Python.start(AndroidPlatform(this))
             }
-            bridge = PythonBridge(this)  // ← Сохраняем в свойство
+            bridge = PythonBridge(this)
             val py = Python.getInstance()
             val module = py.getModule("galya")
             module?.callAttr("set_bridge", bridge)
@@ -133,6 +147,25 @@ class MainActivity : AppCompatActivity() {
             adapter = ChatAdapter(messages)
             recyclerView.layoutManager = LinearLayoutManager(this)
             recyclerView.adapter = adapter
+
+            // Долгое нажатие на поле ввода для вставки из буфера
+            editText.setOnLongClickListener {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                if (clipboard.hasPrimaryClip()) {
+                    val item = clipboard.primaryClip?.getItemAt(0)
+                    val text = item?.text
+                    if (text != null && text.isNotEmpty()) {
+                        editText.setText(text)
+                        editText.setSelection(text.length)
+                        Toast.makeText(this, "Вставлено из буфера", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Буфер пуст", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(this, "Буфер пуст", Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
 
             sendButton.setOnClickListener { 
                 try { sendMessage() } 
@@ -194,6 +227,14 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    fun addAssistantImage(url: String) {
+        runOnUiThread {
+            messages.add(Message("", false, imageUrl = url))
+            adapter.notifyItemInserted(messages.size - 1)
+            recyclerView.scrollToPosition(messages.size - 1)
         }
     }
 
@@ -265,5 +306,26 @@ class MainActivity : AppCompatActivity() {
             e.printStackTrace()
         }
         super.onDestroy()
+    }
+
+    // Вспомогательный метод для получения имени файла из URI
+    private fun getFileName(uri: android.net.Uri): String? {
+        var fileName: String? = null
+        if (uri.scheme == "content") {
+            val cursor = contentResolver.query(uri, null, null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    fileName = it.getString(nameIndex)
+                }
+            }
+        }
+        if (fileName == null) {
+            fileName = uri.path?.let { path ->
+                val lastSlash = path.lastIndexOf('/')
+                if (lastSlash != -1) path.substring(lastSlash + 1) else path
+            }
+        }
+        return fileName
     }
 }
