@@ -1,8 +1,5 @@
 import os
 import io
-import tempfile
-import subprocess
-import sys
 import json
 import threading
 import time
@@ -21,13 +18,13 @@ try:
 except ImportError:
     Document = None
 try:
-    from PyPDF2 import PdfReader
+    from pypdf import PdfReader
 except ImportError:
     PdfReader = None
 try:
-    import textract
+    from olefile import OleFileIO
 except ImportError:
-    textract = None
+    OleFileIO = None
 
 def is_likely_binary(content_bytes, sample_size=1024):
     if not isinstance(content_bytes, bytes):
@@ -109,6 +106,12 @@ PROFILE_CONTEXT = (
 )
 
 class Galya:
+    
+    MIUI_NOTES_PKG = "com.miui.notes"
+    MIUI_MUSIC_PKG = "com.miui.player"
+    MIUI_CALENDAR_PKG = "com.android.calendar"
+    BROWSER_PKG = "com.android.browser"   
+    
     def __init__(self, api_key, model=DEFAULT_MODEL):
         self.api_key = api_key
         self.android_bridge = None
@@ -140,6 +143,8 @@ class Galya:
                     "Никогда не задавай вопрос 'Что продолжить?' или 'Что дальше?'. Если команда выполнена, просто скажи 'Готово' или опиши результат. Если ты еще не получила результат, просто скажи что ждешь результат, дождись результата и ответь, даже если с опозданием. "
                     "Если результат задачи сразу не пришел, дождись выполнения или результата и ответь, как уже увидишь результат. "
                     "Никогда не отправляй теги в ответ на теги. Если получила системное сообщение, реагируй на него как на результат, но не генерируй новые теги без явной просьбы. "
+                    "Не используй тег [READ_URL] без явной просьбы пользователя. "
+                    "После получения результата команды (в системном сообщении) обязательно ответь пользователю, используя этот результат. "
                     "Будь спонтанной, женственной, как живой человек, представь, что ты его девушка и веди себя соответственно, но не переусердствуй. "
                     "Твои команды: "
                     "[OPEN_APP]...[/OPEN_APP] — открыть приложение; "
@@ -268,30 +273,471 @@ class Galya:
         except:
             pass
 
-    def _transcribe_audio(self, audio_path_or_bytes, filename):
+    def _dump_screen_text(self, tag=""):
+        if not self.android_bridge:
+            return "Нет bridge"
+        text = self.execute_automation([{'action': 'get_text'}])
+        print(f"=== СОДЕРЖИМОЕ ЭКРАНА [{tag}] ===\n{text}\n=============================")
+        return text
+    
+    def execute_automation(self, commands):
+        if not self.android_bridge:
+            return "Нет доступа к Android Bridge"
+        results = []
+        for cmd in commands:
+            action = cmd.get('action')
+            if action == 'launch':
+                pkg = cmd.get('package')
+                res = self.android_bridge.accessibilityAction('launchApp', pkg)
+                results.append(res)
+            elif action == 'wait':
+                sec = cmd.get('seconds', 1)
+                time.sleep(sec)
+                results.append(f"wait {sec}s")
+            elif action == 'click_by_text':
+                text = cmd.get('text')
+                partial = cmd.get('partial', False)
+                res = self.android_bridge.accessibilityAction('clickByText', text, str(partial))
+                results.append(res)
+            elif action == 'click_by_content_desc':
+                desc = cmd.get('desc')
+                res = self.android_bridge.accessibilityAction('clickByContentDesc', desc)
+                results.append(res)
+            elif action == 'click_by_class':
+                cls = cmd.get('class')
+                res = self.android_bridge.accessibilityAction('clickByClass', cls)
+                results.append(res)
+            elif action == 'input_focused':
+                # ввод в текущее фокусное поле
+                text = cmd.get('text')
+                res = self.android_bridge.accessibilityAction('inputFocused', text)
+                results.append(res)
+            elif action == 'input_by_hint':
+                hint = cmd.get('hint')
+                text = cmd.get('text')
+                res = self.android_bridge.accessibilityAction('inputByHint', hint, text)
+                results.append(res)
+            elif action == 'press_enter':
+                res = self.android_bridge.accessibilityAction('pressEnter')
+                results.append(res)
+            elif action == 'get_text':
+                res = self.android_bridge.accessibilityAction('getWindowText')
+                results.append(res)
+            elif action == 'back':
+                res = self.android_bridge.accessibilityAction('goBack')
+                results.append(res)
+            # можно добавить другие
+        return "\n".join(results)
+
+    def create_note_in_miui(self, text):
+        if not self.android_bridge:
+            return "Нет доступа к Android Bridge"
+        
+        self.android_bridge.openApp("Заметки")
+        time.sleep(8)  # ждём полной загрузки
+        
+        # ---- Шаг 1: Нажать кнопку создания новой заметки ----
+        create_actions = [
+            {'type': 'text', 'text': 'Добавить', 'partial': True},
+            {'type': 'text', 'text': 'Создать', 'partial': True},
+            {'type': 'text', 'text': 'Новая заметка', 'partial': True},
+            {'type': 'text', 'text': 'Новая', 'partial': True},
+            {'type': 'text', 'text': 'Написать', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+            {'type': 'class', 'class': 'android.widget.FloatingActionButton'},
+            {'type': 'class', 'class': 'android.widget.Button'},
+            {'type': 'desc', 'desc': 'Создать'},
+            {'type': 'desc', 'desc': 'Добавить'},
+            {'type': 'desc', 'desc': 'Новая заметка'},
+        ]
+        if not self._click_with_fallback(create_actions, timeout=15):
+            self._dump_screen_text("Создание заметки - не найдена кнопка создания")
+            return "Не удалось найти кнопку создания заметки"
+        
+        time.sleep(3)
+        # ---- Шаг 2: Ввод текста ----
+        # Пытаемся кликнуть в поле ввода
+        input_actions = [
+            {'type': 'class', 'class': 'android.widget.EditText'},
+            {'type': 'class', 'class': 'android.widget.TextView'},
+            {'type': 'text', 'text': 'Введите текст', 'partial': True},
+            {'type': 'text', 'text': 'Заметка', 'partial': True},
+        ]
+        self._click_with_fallback(input_actions, timeout=5)
+        time.sleep(1)
+        
+        # Вводим текст
+        self.execute_automation([{'action': 'input_focused', 'text': text}])
+        time.sleep(2)
+        
+        # ---- Шаг 3: Сохранить ----
+        save_actions = [
+            {'type': 'text', 'text': 'Сохранить', 'partial': True},
+            {'type': 'text', 'text': 'Готово', 'partial': True},
+            {'type': 'text', 'text': 'ОК', 'partial': True},
+            {'type': 'text', 'text': 'Применить', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.Button'},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+            {'type': 'desc', 'desc': 'Сохранить'},
+            {'type': 'desc', 'desc': 'Готово'},
+            # Назад (иногда сохраняет)
+            {'type': 'action', 'action': 'back'},
+        ]
+        # Пробуем сохранить до 3 раз с интервалом
+        for attempt in range(3):
+            if self._click_with_fallback(save_actions, timeout=8):
+                break
+            time.sleep(2)
+        else:
+            self._dump_screen_text("Создание заметки - не найдена кнопка сохранения")
+            return "Не удалось сохранить заметку"
+        
+        time.sleep(3)
+        self.messages.append({"role": "system", "content": f"📝 Заметка создана: {text[:50]}..."})
+        self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
+        return "Заметка создана"
+
+    def search_searxng(self, query):
+        searx_instances = [
+            "https://search.rhscz.eu/search",     # 69 онлайн-инстансов
+            "https://searx.rhscz.eu/search",      # С этого же сервера
+            "https://searx.be/search",            # Самый известный публичный инстанс
+            "https://searx.tiekoetter.com/search",# Старый проверенный
+            "https://search.bus-hit.me/search",   # Ещё один надёжный
+        ]
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        params = {
+            "q": query,
+            "format": "json",
+            "categories": "general",
+            "engines": "google,bing,duckduckgo",
+            "results_on_new_tab": 0,
+            "number_of_results": 5
+        }
+        for searx_url in searx_instances:
+            try:
+                response = requests.get(searx_url, params=params, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get("results", [])
+                    if results:
+                        output = []
+                        for r in results[:5]:
+                            title = r.get("title", "Без названия")
+                            url = r.get("url", "")
+                            content = r.get("content", "")
+                            if len(content) > 300:
+                                content = content[:300] + "..."
+                            output.append(f"**{title}**\n{content}\n[Ссылка]({url})")
+                        return output if output else None
+                    else:
+                        # Иногда results не пустой, но не содержит результатов. Логируем и пробуем дальше.
+                        print(f"⚠️ Инстанс {searx_url} вернул пустой результат")
+                        continue
+                else:
+                    print(f"❌ Ошибка {response.status_code} от {searx_url}")
+                    continue
+            except Exception as e:
+                print(f"❌ Исключение при подключении к {searx_url}: {e}")
+                continue
+        return None
+    
+    def google_search_and_extract(self, query):
+        if not self.android_bridge:
+            return "Нет доступа к Android Bridge"
+        
+        self.android_bridge.openApp("Браузер")
+        time.sleep(6)  # больше времени на загрузку браузера
+        
+        # Ищем адресную строку
+        addr_actions = [
+            {'type': 'class', 'class': 'android.widget.EditText'},
+            {'type': 'text', 'text': 'Поиск', 'partial': True},
+            {'type': 'text', 'text': 'Адрес', 'partial': True},
+        ]
+        if not self._click_with_fallback(addr_actions, timeout=8):
+            return "Не найдена адресная строка"
+        
+        time.sleep(1)
+        self.execute_automation([{'action': 'input_focused', 'text': query}])
+        time.sleep(1)
+        
+        # Подтверждаем поиск
+        confirm_actions = [
+            {'type': 'text', 'text': 'Перейти', 'partial': True},
+            {'type': 'text', 'text': 'Найти', 'partial': True},
+            {'type': 'text', 'text': 'Поиск', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+        ]
+        if not self._click_with_fallback(confirm_actions, timeout=4):
+            self.execute_automation([{'action': 'press_enter'}])
+        
+        time.sleep(10)  # ждём загрузки результатов
+        
+        # Пробуем кликнуть по первой ссылке (разные варианты)
+        link_actions = [
+            {'type': 'class', 'class': 'android.widget.TextView'},
+            {'type': 'class', 'class': 'android.view.View'},
+            {'type': 'text', 'text': 'Открыть', 'partial': True},
+            {'type': 'desc', 'desc': 'Перейти по ссылке'},
+            {'type': 'class', 'class': 'android.widget.LinearLayout'},
+        ]
+        if not self._click_with_fallback(link_actions, timeout=8):
+            # Если не нашли, пробуем кликнуть по центру экрана (иногда помогает)
+            pass
+        
+        time.sleep(6)
+        article_text = self.execute_automation([{'action': 'get_text'}])
+        
+        full_result = f"🔍 Поиск в браузере по запросу '{query}':\n\n{article_text[:1500]}"
+        self.messages.append({"role": "system", "content": full_result})
+        self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
+        return full_result
+
+    def play_track_in_miui(self, track_name):
+        if not self.android_bridge:
+            return "Нет доступа к Android Bridge"
+        
+        self.android_bridge.openApp("Музыка")
+        time.sleep(8)
+        
+        # ---- Шаг 1: Открыть поиск ----
+        search_actions = [
+            {'type': 'text', 'text': 'Поиск', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+            {'type': 'desc', 'desc': 'Поиск'},
+            {'type': 'class', 'class': 'android.widget.Button'},
+        ]
+        if not self._click_with_fallback(search_actions, timeout=10):
+            self._dump_screen_text("Музыка - не найден поиск")
+            return "Не удалось открыть поиск"
+        
+        time.sleep(3)
+        # ---- Шаг 2: Ввести название трека ----
+        input_actions = [
+            {'type': 'class', 'class': 'android.widget.EditText'},
+            {'type': 'class', 'class': 'android.widget.TextView'},
+        ]
+        self._click_with_fallback(input_actions, timeout=5)
+        time.sleep(1)
+        self.execute_automation([{'action': 'input_focused', 'text': track_name}])
+        time.sleep(1)
+        
+        # ---- Шаг 3: Нажать Enter или кнопку поиска ----
+        confirm_actions = [
+            {'type': 'text', 'text': 'Найти', 'partial': True},
+            {'type': 'text', 'text': 'Поиск', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+        ]
+        if not self._click_with_fallback(confirm_actions, timeout=3):
+            self.execute_automation([{'action': 'press_enter'}])
+        
+        time.sleep(6)  # Ждём результаты
+        
+        # ---- Шаг 4: Кликнуть по первому треку ----
+        track_actions = [
+            {'type': 'class', 'class': 'android.widget.TextView'},
+            {'type': 'class', 'class': 'android.widget.LinearLayout'},
+            {'type': 'class', 'class': 'android.widget.RelativeLayout'},
+        ]
+        if not self._click_with_fallback(track_actions, timeout=8):
+            self._dump_screen_text("Музыка - не найден трек")
+            return "Не удалось выбрать трек"
+        
+        time.sleep(3)
+        # ---- Шаг 5: Нажать Play ----
+        play_actions = [
+            {'type': 'text', 'text': 'Воспроизвести', 'partial': True},
+            {'type': 'text', 'text': 'Play', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+            {'type': 'desc', 'desc': 'Воспроизвести'},
+            {'type': 'class', 'class': 'android.widget.Button'},
+        ]
+        for attempt in range(3):
+            if self._click_with_fallback(play_actions, timeout=5):
+                break
+            time.sleep(2)
+        else:
+            self._dump_screen_text("Музыка - не найдена кнопка Play")
+            return "Не удалось воспроизвести трек"
+        
+        self.messages.append({"role": "system", "content": f"🎵 Трек '{track_name}' запущен"})
+        self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
+        return "Трек запущен"
+
+    def create_calendar_event(self, title, date=None):
+        if not self.android_bridge:
+            return "Нет доступа к Android Bridge"
+        
+        self.android_bridge.openApp("Календарь")
+        time.sleep(8)
+        
+        # ---- Шаг 1: Кнопка создания ----
+        create_actions = [
+            {'type': 'text', 'text': 'Создать', 'partial': True},
+            {'type': 'text', 'text': 'Добавить', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.ImageButton'},
+            {'type': 'class', 'class': 'android.widget.FloatingActionButton'},
+            {'type': 'class', 'class': 'android.widget.Button'},
+            {'type': 'desc', 'desc': 'Создать событие'},
+        ]
+        if not self._click_with_fallback(create_actions, timeout=12):
+            self._dump_screen_text("Календарь - не найдена кнопка создания")
+            return "Не удалось создать событие"
+        
+        time.sleep(3)
+        # ---- Шаг 2: Ввод заголовка ----
+        input_actions = [
+            {'type': 'class', 'class': 'android.widget.EditText'},
+            {'type': 'text', 'text': 'Название', 'partial': True},
+            {'type': 'text', 'text': 'Заголовок', 'partial': True},
+        ]
+        self._click_with_fallback(input_actions, timeout=5)
+        time.sleep(1)
+        self.execute_automation([{'action': 'input_focused', 'text': title}])
+        time.sleep(2)
+        
+        # ---- Шаг 3: Сохранить ----
+        save_actions = [
+            {'type': 'text', 'text': 'Сохранить', 'partial': True},
+            {'type': 'text', 'text': 'Готово', 'partial': True},
+            {'type': 'text', 'text': 'ОК', 'partial': True},
+            {'type': 'class', 'class': 'android.widget.Button'},
+            {'type': 'desc', 'desc': 'Сохранить'},
+        ]
+        for attempt in range(3):
+            if self._click_with_fallback(save_actions, timeout=8):
+                break
+            time.sleep(2)
+        else:
+            self._dump_screen_text("Календарь - не найдена кнопка сохранения")
+            return "Не удалось сохранить событие"
+        
+        self.messages.append({"role": "system", "content": f"📅 Событие '{title}' создано"})
+        self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
+        return "Событие создано"
+
+    def create_text_file_in_downloads(self, filename, content):
+        if self.android_bridge:
+            downloads = self.android_bridge.getDownloadsPath()
+            filepath = os.path.join(downloads, filename)
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                return f"✅ Файл '{filename}' создан в папке Загрузки."
+            except Exception as e:
+                return f"❌ Ошибка создания файла: {e}"
+        else:
+            return "Нет доступа к хранилищу."
+
+    def _click_with_fallback(self, actions, timeout=10):
+        start = time.time()
+        while time.time() - start < timeout:
+            for action in actions:
+                if action['type'] == 'text':
+                    result = self.execute_automation([{'action': 'click_by_text', 'text': action['text'], 'partial': action.get('partial', False)}])
+                    if 'OK' in result:
+                        time.sleep(0.5)
+                        return True
+                elif action['type'] == 'class':
+                    result = self.execute_automation([{'action': 'click_by_class', 'class': action['class']}])
+                    if 'OK' in result:
+                        time.sleep(0.5)
+                        return True
+                elif action['type'] == 'desc':
+                    result = self.execute_automation([{'action': 'click_by_content_desc', 'desc': action['desc']}])
+                    if 'OK' in result:
+                        time.sleep(0.5)
+                        return True
+                elif action['type'] == 'action' and action.get('action') == 'back':
+                    self.execute_automation([{'action': 'back'}])
+                    time.sleep(0.5)
+                    return True
+            time.sleep(0.5)
+        return False
+
+    def _wait_for_text_in_window(self, expected_text, timeout=8):
+        start = time.time()
+        while time.time() - start < timeout:
+            window_text = self.execute_automation([{'action': 'get_text'}])
+            if expected_text.lower() in window_text.lower():
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _input_text_and_confirm(self, text, confirm_actions=None):
+        self.execute_automation([{'action': 'click_by_class', 'class': 'android.widget.EditText'}])
+        time.sleep(0.5)
+        self.execute_automation([{'action': 'input_focused', 'text': text}])
+        time.sleep(1)
+        if confirm_actions:
+            self._click_with_fallback(confirm_actions, timeout=3)
+        else:
+            self.execute_automation([{'action': 'press_enter'}])
+        time.sleep(1)
+    
+    def _transcribe_audio(self, audio_bytes, filename):
         url = "https://bothub.chat/api/v2/openai/v1/audio/transcriptions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        
+        # Определяем MIME-тип по расширению
+        ext = filename.split('.')[-1].lower()
+        mime_map = {
+            'mp3': 'audio/mpeg',
+            'm4a': 'audio/mp4',
+            '3gp': 'audio/3gpp',
+            'wav': 'audio/wav',
+            'ogg': 'audio/ogg',
+            'flac': 'audio/flac',
+        }
+        mime_type = mime_map.get(ext, 'audio/mpeg')
+        
+        if not audio_bytes:
+            print("❌ _transcribe_audio: пустые байты")
+            return None
+        
+        print(f"📤 Транскрипция: {filename}, размер {len(audio_bytes)} байт, MIME {mime_type}")
+        
+        files = {"file": (filename, audio_bytes, mime_type)}
+        data = {"model": "whisper-1", "response_format": "text", "language": "ru"}
+        
         try:
-            if isinstance(audio_path_or_bytes, str):
-                with open(audio_path_or_bytes, "rb") as f:
-                    files = {"file": (filename, f, "audio/mpeg")}
-                    data = {"model": "whisper-1", "response_format": "text"}
-                    response = requests.post(url, headers=headers, files=files, data=data, timeout=60)
-            else:
-                files = {"file": (filename, audio_path_or_bytes, "audio/mpeg")}
-                data = {"model": "whisper-1", "response_format": "text"}
-                response = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+            response = requests.post(url, headers=headers, files=files, data=data, timeout=120)
+            print(f"📡 Ответ сервера: статус {response.status_code}")
+            
             if response.status_code == 200:
-                # BotHub может вернуть текст или JSON
-                if response.headers.get('content-type', '').startswith('application/json'):
-                    return response.json().get("text", "").strip()
+                content_type = response.headers.get('content-type', '')
+                if 'application/json' in content_type:
+                    result = response.json()
+                    text = result.get("text", "").strip()
                 else:
-                    return response.text.strip()
+                    text = response.text.strip()
+                
+                if text:
+                    print(f"✅ Транскрипция успешна: {text[:100]}...")
+                    return text
+                else:
+                    print("⚠️ Транскрипция вернула пустую строку")
+                    return None
             else:
-                self.log(f"Whisper API error {response.status_code}: {response.text}", "red")
+                # Пытаемся извлечь сообщение об ошибке
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    error_detail = error_json.get('error', {}).get('message', error_detail)
+                except:
+                    pass
+                print(f"❌ Ошибка API ({response.status_code}): {error_detail}")
                 return None
+        except requests.exceptions.Timeout:
+            print("❌ Таймаут при транскрипции (120 сек)")
+            return None
         except Exception as e:
-            self.log(f"Ошибка транскрипции аудио: {e}", "red")
+            print(f"❌ Исключение при транскрипции: {e}")
             return None
 
     def _play_media_file(self, filepath):
@@ -309,70 +755,62 @@ class Galya:
             return False
 
     def generate_image(self, prompt):
-        url = "https://bothub.chat/api/v2/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        model = "gemini-3-pro-image-preview"
         payload = {
-            "model": "gemini-2.5-flash-image",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Ты — модель генерации изображений. Создай изображение по запросу пользователя. Верни ответ в формате markdown с ссылкой на изображение или base64. Если возможно, используй ссылку. Не добавляй лишнего текста."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_tokens": 1000,
-            "temperature": 0.7
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "image_config": {"aspect_ratio": "1:1", "image_size": "2K"},
+            "response_modalities": ["IMAGE", "TEXT"]
         }
 
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            if response.status_code == 200:
-                data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                import re
-                match = re.search(r'!\[.*?\]\((.*?)\)', content)
-                if match:
-                    image_url = match.group(1)
-                else:
-                    url_match = re.search(r'(https?://[^\s]+)', content)
-                    image_url = url_match.group(1) if url_match else None
-                if image_url:
-                    if self.android_bridge and hasattr(self.android_bridge, 'saveImageAndShow'):
-                        self.android_bridge.saveImageAndShow(image_url)
-                        self.messages.append({"role": "system", "content": "🎨 Изображение сгенерировано и отображено в чате."})
-                    else:
-                        self.messages.append({"role": "system", "content": f"🎨 Сгенерировано изображение: {image_url}"})
-                    self.save_history()
-                    threading.Thread(target=self._call_api, daemon=True).start()
-                    return True
-                else:
-                    self.messages.append({"role": "system", "content": f"🎨 Результат генерации:\n{content}"})
-                    self.save_history()
-                    threading.Thread(target=self._call_api, daemon=True).start()
-                    return True
-            else:
-                self.log(f"Ошибка генерации изображения: {response.status_code} - {response.text}", "red")
-                self.messages.append({
-                    "role": "system",
-                    "content": f"❌ Не удалось сгенерировать изображение. Ошибка API: {response.status_code}"
-                })
+            response = requests.post(API_URL, headers=self.headers, json=payload, timeout=120)
+            if response.status_code != 200:
+                error_msg = f"❌ Ошибка API: {response.status_code}"
+                self.messages.append({"role": "system", "content": error_msg})
                 self.save_history()
-                threading.Thread(target=self._call_api, daemon=True).start()
+                self._call_api()
                 return False
-        except Exception as e:
-            self.log(f"Ошибка генерации изображения: {e}", "red")
-            self.messages.append({
-                "role": "system",
-                "content": f"❌ Ошибка при генерации изображения: {e}"
-            })
+
+            data = response.json()
+            message = data["choices"][0]["message"]
+
+            # Проверяем наличие изображений в новом формате
+            if "images" in message and message["images"]:
+                image_url = message["images"][0]["image_url"]["url"]
+                if image_url.startswith("data:"):
+                    base64_data = image_url.split(",", 1)[1]
+                    if self.android_bridge:
+                        self.android_bridge.saveBase64Image(base64_data, "png")
+                        self.messages.append({"role": "system", "content": "🎨 Изображение сгенерировано и сохранено в галерею."})
+                    else:
+                        self.messages.append({"role": "system", "content": "🎨 Изображение получено, но не сохранено (нет bridge)."})
+                    self.save_history()
+                    self._call_api()
+                    return True
+
+            # Проверяем старый формат inline_data
+            if "inline_data" in message and message["inline_data"].get("data"):
+                base64_data = message["inline_data"]["data"]
+                if self.android_bridge:
+                    self.android_bridge.saveBase64Image(base64_data, "png")
+                    self.messages.append({"role": "system", "content": "🎨 Изображение сгенерировано и сохранено в галерею."})
+                else:
+                    self.messages.append({"role": "system", "content": "🎨 Изображение получено, но не сохранено (нет bridge)."})
+                self.save_history()
+                self._call_api()
+                return True
+
+            self.messages.append({"role": "system", "content": f"⚠️ Не удалось извлечь изображение. Ответ:\n{message.get('content', 'Пусто')}"})
             self.save_history()
-            threading.Thread(target=self._call_api, daemon=True).start()
+            self._call_api()
+            return True
+
+        except Exception as e:
+            error_msg = f"❌ Ошибка при генерации: {e}"
+            self.messages.append({"role": "system", "content": error_msg})
+            self.save_history()
+            self._call_api()
             return False
     
     def search_wikipedia(self, query):
@@ -400,67 +838,119 @@ class Galya:
             return None
 
     def search_news(self, query):
-        try:
-            google_news = GNews(language='ru', country='RU', max_results=3)
-            news = google_news.get_news(query)
-            if not news:
-                google_news = GNews(language='en', country='US', max_results=3)
-                news = google_news.get_news(query)
-            output = []
-            for item in news[:3]:
-                desc = item.get('description', '')[:150] + "..." if len(item.get('description', '')) > 150 else item.get('description', '')
-                output.append(f"**{item['title']}**\n{desc}\n[Источник]({item['url']})")
-            return output if output else None
-        except Exception as e:
-            return None
-
-    def search_brave(self, query):
-        if not BRAVE_API_KEY:
-            return None
-        try:
-            url = "https://api.search.brave.com/res/v1/web/search"
-            headers = {
-                "Accept": "application/json",
-                "X-Subscription-Token": BRAVE_API_KEY
+        news_sources = {
+            "ria": {  # РИА Новости
+                "url": "https://ria.ru/search/",
+                "type": "ria",
+                "params": {"query": query}
+            },
+            "cnews": {  # Новости высоких технологий
+                "url": "https://www.cnews.ru/search/",
+                "type": "cnews",
+                "params": {"text": query}
+            },
+            "ferra": {  # Наука и технологии
+                "url": "https://www.ferra.ru/search/",
+                "type": "ferra",
+                "params": {"q": query}
+            },
+            "lenta": {  # Lenta.ru: Наука и техника
+                "url": "https://lenta.ru/rss/news",
+                "type": "rss",
+                "feed_url": "https://lenta.ru/rss/news"
+            },
+            "kommersant": {  # Коммерсантъ
+                "url": "https://www.kommersant.ru/RSS/news.xml",
+                "type": "rss",
+                "feed_url": "https://www.kommersant.ru/RSS/news.xml"
             }
-            params = {"q": query, "count": 3}
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                output = []
-                for result in data.get("web", {}).get("results", [])[:3]:
-                    desc = result.get('description', '')[:150] + "..." if len(result.get('description', '')) > 150 else result.get('description', '')
-                    output.append(f"**{result.get('title')}**\n{desc}\n[Ссылка]({result.get('url')})")
-                return output if output else None
-        except Exception as e:
-            return None
+        }
 
-    def search_google(self, query):
-        try:
-            url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num=3"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for g in soup.find_all('div', class_='g')[:3]:
-                title_elem = g.find('h3')
-                if not title_elem:
-                    continue
-                title = title_elem.get_text(strip=True)
-                link_elem = g.find('a')
-                link = link_elem.get('href') if link_elem else ''
-                snippet_elem = g.find('div', class_='IsZvec')
-                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
-                if link.startswith('/url?q='):
-                    link = link.split('/url?q=')[1].split('&')[0]
-                results.append(f"**{title}**\n{snippet}\n[Ссылка]({link})")
-            return results if results else None
-        except Exception as e:
-            print(f"Google search error: {e}")
-            return None
+        def parse_rss(feed_url):
+            try:
+                import feedparser
+                response = requests.get(feed_url, timeout=10)
+                if response.status_code == 200:
+                    feed = feedparser.parse(response.content)
+                    output = []
+                    for entry in feed.entries[:5]:
+                        title = entry.get('title', 'Без названия')
+                        link = entry.get('link', '#')
+                        output.append(f"**{title}**\n[Читать]({link})")
+                    return output if output else None
+                else:
+                    return None
+            except Exception as e:
+                print(f"Ошибка парсинга RSS {feed_url}: {e}")
+                return None
+
+        for source_name, source_data in news_sources.items():
+            try:
+                if source_data["type"] == "ria":
+                    url = source_data["url"]
+                    params = source_data["params"]
+                    response = requests.get(url, params=params, timeout=10)
+                    if response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        output = []
+                        for link in soup.find_all('a', class_='list-item__title'):
+                            title = link.get_text(strip=True)
+                            href = link.get('href')
+                            if href and not href.startswith('http'):
+                                href = 'https://ria.ru' + href
+                            output.append(f"**{title}**\n[Читать]({href})")
+                            if len(output) >= 3:
+                                break
+                        if output:
+                            return output
+                elif source_data["type"] == "cnews":
+                    url = source_data["url"]
+                    params = source_data["params"]
+                    response = requests.get(url, params=params, timeout=10)
+                    if response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        output = []
+                        for link in soup.find_all('a', class_='news-item__title'):
+                            title = link.get_text(strip=True)
+                            href = link.get('href')
+                            if href:
+                                output.append(f"**{title}**\n[Читать]({href})")
+                                if len(output) >= 3:
+                                    break
+                        if output:
+                            return output
+                elif source_data["type"] == "ferra":
+                    url = source_data["url"]
+                    params = source_data["params"]
+                    response = requests.get(url, params=params, timeout=10)
+                    if response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        output = []
+                        for link in soup.find_all('a', class_='entry-title'):
+                            title = link.get_text(strip=True)
+                            href = link.get('href')
+                            if href:
+                                output.append(f"**{title}**\n[Читать]({href})")
+                                if len(output) >= 3:
+                                    break
+                        if output:
+                            return output
+                elif source_data["type"] == "rss":
+                    rss_output = parse_rss(source_data["feed_url"])
+                    if rss_output:
+                        filtered = []
+                        for item in rss_output:
+                            if query.lower() in item.lower():
+                                filtered.append(item)
+                        if filtered:
+                            return filtered[:3]
+                        else:
+                            return rss_output[:3]  # Если по запросу не отфильтровалось, показываем последние новости
+            except Exception as e:
+                print(f"Ошибка поиска в {source_name}: {e}")
+                continue
+
+        return None
 
     def process_search(self, query, search_type="general"):
         """Универсальный поиск с гарантированным ответом Гали"""
@@ -470,7 +960,6 @@ class Galya:
             self.messages.append({"role": "system", "content": "Пустой поисковый запрос."})
             self.save_history()
             threading.Thread(target=self._call_api, daemon=True).start()
-
         
         # --- НОВОСТИ ---
         if search_type == "news":
@@ -479,14 +968,14 @@ class Galya:
             except Exception as e:
                 print(f"[NEWS] Ошибка: {e}")
                 results = None
-            
+
             if results:
                 output = f"**Новости по запросу \"{query}\":**\n\n" + "\n\n---\n\n".join(results)
                 self.messages.append({
                     "role": "system",
                     "content": f"Пользователь искал новости '{query}'. Вот результаты:\n{output}"
                 })
-                print("[NEWS] Найдены новости, добавлено сообщение в историю")
+                self.save_history()
             else:
                 url = f"https://www.google.com/search?q={urllib.parse.quote(query)}+новости&tbm=nws"
                 if self.android_bridge:
@@ -495,14 +984,12 @@ class Galya:
                         "role": "system",
                         "content": f"Новостей не найдено, открываю поиск Google по запросу '{query}'."
                     })
-                    print("[NEWS] Открываю Google News в браузере")
                 else:
                     self.messages.append({
                         "role": "system",
                         "content": f"Не удалось открыть поиск: нет доступа к браузеру."
                     })
-                    print("[NEWS] Ошибка: нет android_bridge")
-            self.save_history()
+                self.save_history()
             threading.Thread(target=self._call_api, daemon=True).start()
             return
 
@@ -543,12 +1030,7 @@ class Galya:
 
         # --- ОБЩИЙ ПОИСК ---
         if search_type == "general":
-            try:
-                results = self.search_google(query)
-            except Exception as e:
-                print(f"[GOOGLE] Ошибка: {e}")
-                results = None
-            
+            results = self.search_searxng(query)
             if results:
                 self.last_search_results = []
                 for res in results:
@@ -560,22 +1042,19 @@ class Galya:
                     "role": "system",
                     "content": f"Пользователь искал '{query}'. Вот результаты:\n{output}"
                 })
-                print("[GOOGLE] Найдены результаты, добавлено сообщение в историю")
             else:
                 url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
                 if self.android_bridge:
                     self.android_bridge.openUrl(url)
                     self.messages.append({
                         "role": "system",
-                        "content": f"Открываю поиск Google по запросу '{query}'."
+                        "content": f"Не удалось получить результаты поиска, открываю Google по запросу '{query}' в браузере."
                     })
-                    print("[GOOGLE] Открываю браузер с поиском Google")
                 else:
                     self.messages.append({
                         "role": "system",
-                        "content": f"Не удалось открыть поиск: нет доступа к браузеру."
+                        "content": f"Не удалось выполнить поиск: нет доступа к браузеру."
                     })
-                    print("[GOOGLE] Ошибка: нет android_bridge")
             self.save_history()
             threading.Thread(target=self._call_api, daemon=True).start()
             return
@@ -700,26 +1179,56 @@ class Galya:
         text_extensions = ['.txt', '.py', '.json', '.xml', '.html', '.css', '.js', '.md', '.csv']
 
         # Аудиофайлы — транскрибируем
-        if ext in ['.mp3', '.wav', '.ogg', '.flac', '.m4a']:
+        if ext in ['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.3gp']:
+            print(f"[AUDIO] Обнаружен аудиофайл: {filename}, расширение {ext}, размер данных: {len(content) if isinstance(content, bytes) else 'путь'}")
             self.messages.append({
                 "role": "system",
                 "content": f"🎵 Получен аудиофайл: {filename}. Распознаю речь..."
             })
             self.save_history()
             
-            # Запускаем транскрипцию в фоне
             def process_audio():
-                text = self._transcribe_audio(content, filename)
+                # Убедимся, что content — это байты
+                if isinstance(content, str):
+                    # Если передан путь, читаем файл
+                    try:
+                        with open(content, 'rb') as f:
+                            audio_bytes = f.read()
+                    except Exception as e:
+                        self.messages.append({
+                            "role": "system",
+                            "content": f"❌ Не удалось прочитать аудиофайл с диска: {e}"
+                        })
+                        self.save_history()
+                        self._call_api()
+                        return
+                else:
+                    audio_bytes = content
+                
+                if not audio_bytes:
+                    self.messages.append({
+                        "role": "system",
+                        "content": f"❌ Аудиофайл {filename} пуст или повреждён."
+                    })
+                    self.save_history()
+                    self._call_api()
+                    return
+                
+                text = self._transcribe_audio(audio_bytes, filename)
                 if text:
                     self.messages.append({
                         "role": "system",
                         "content": f"📝 Транскрипция аудиофайла {filename}:\n```\n{text}\n```"
                     })
+                    if self.android_bridge:
+                        self.android_bridge.playDone()
                 else:
                     self.messages.append({
                         "role": "system",
-                        "content": f"❌ Не удалось распознать речь в файле {filename}."
+                        "content": f"❌ Не удалось распознать речь в файле {filename}. Проверьте формат (должен быть MP3, M4A, WAV, OGG, FLAC, 3GP) и качество записи."
                     })
+                    if self.android_bridge:
+                        self.android_bridge.playError()
                 self.save_history()
                 threading.Thread(target=self._call_api, daemon=True).start()
             
@@ -751,7 +1260,7 @@ class Galya:
             if PdfReader is None:
                 self.messages.append({
                     "role": "system",
-                    "content": f"❌ Для чтения PDF требуется библиотека PyPDF2. Файл {filename} не может быть обработан."
+                    "content": f"❌ Для чтения PDF требуется библиотека pypdf. Файл {filename} не может быть обработан."
                 })
                 self.save_history()
                 threading.Thread(target=self._call_api, daemon=True).start()
@@ -828,41 +1337,84 @@ class Galya:
         threading.Thread(target=self._call_api, daemon=True).start()
 
     def _process_doc(self, filename, content):
-        if textract is None:
-            self.messages.append({
-                "role": "system",
-                "content": f"❌ Для чтения старых DOC файлов требуется библиотека textract. Файл {filename} не может быть обработан."
-            })
-            self.save_history()
-            threading.Thread(target=self._call_api, daemon=True).start()
-            return
+        encodings = ['utf-8', 'cp1251', 'koi8-r', 'iso-8859-5', 'cp866', 'mac-cyrillic', 'utf-16', 'utf-16-le', 'utf-16-be']
+
+        def decode_text(data_bytes):
+            for enc in encodings:
+                try:
+                    return data_bytes.decode(enc, errors='ignore').strip()
+                except:
+                    continue
+            return data_bytes.decode('utf-8', errors='ignore')
 
         try:
             if isinstance(content, bytes):
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
-                    tmp.write(content)
-                    tmp_path = tmp.name
-                extracted = textract.process(tmp_path).decode('utf-8', errors='replace')
-                os.unlink(tmp_path)
+                raw = content
             else:
-                extracted = textract.process(content).decode('utf-8', errors='replace')
-            if not extracted.strip():
-                extracted = "[Текст не найден в документе]"
-
-            self.messages.append({
-                "role": "system",
-                "content": f"📄 Пользователь загрузил документ {filename}. Содержимое:\n```\n{extracted}\n```"
-            })
-            self.save_history()
-            self.log(f"DOC файл {filename} обработан, текст добавлен в историю ({len(extracted)} символов)", "green")
+                with open(content, 'rb') as f:
+                    raw = f.read()
+            text = decode_text(raw)
+            if text:
+                self._finalize_processing(filename, text)
+                return
         except Exception as e:
-            self.messages.append({
-                "role": "system",
-                "content": f"❌ Не удалось прочитать документ {filename}: {e}"
-            })
+            self.log(f"Ошибка при чтении DOC как текст: {e}", "yellow", "system")
+
+        try:
+            from olefile import OleFileIO
+            import io
+
+            if isinstance(content, bytes):
+                ole = OleFileIO(io.BytesIO(content))
+            else:
+                ole = OleFileIO(content)
+
+            all_text = []
+
+            def extract_from_storage(storage):
+                for entry in storage.listdir():
+                    # Поток
+                    try:
+                        stream = storage.openstream(entry)
+                        data = stream.read()
+                        if data:
+                            text = decode_text(data)
+                            if text:
+                                all_text.append(text)
+                    except:
+                        pass
+                    try:
+                        if storage.exists(entry) and storage.get_type(entry) == 1:
+                            sub = storage.openstorage(entry)
+                            extract_from_storage(sub)
+                    except:
+                        pass
+
+            extract_from_storage(ole)
+            ole.close()
+
+            if all_text:
+                full_text = "\n".join(all_text)
+                self._finalize_processing(filename, full_text)
+                return
+            else:
+                raise Exception("olefile не извлёк текст")
+        except Exception as e:
+            self.log(f"Ошибка olefile: {e}", "red", "system")
+            self.messages.append({"role": "system", "content": f"❌ Не удалось прочитать документ {filename}. Формат может быть повреждён или защищён."})
             self.save_history()
-            self.log(f"Ошибка DOC: {e}", "red")
+            threading.Thread(target=self._call_api, daemon=True).start()
+
+    def _finalize_processing(self, filename, text_content):
+        if not text_content.strip():
+            text_content = "[Текст не найден в документе]"
+        
+        self.messages.append({
+            "role": "system",
+            "content": f"📄 Пользователь загрузил документ {filename}. Содержимое:\n```\n{text_content[:2000]}\n```"
+        })
+        self.save_history()
+        self.log(f"DOC файл {filename} обработан, текст добавлен в историю ({len(text_content)} символов)", "green")
         threading.Thread(target=self._call_api, daemon=True).start()
     
     def _process_docx(self, filename, content):
@@ -902,11 +1454,10 @@ class Galya:
         threading.Thread(target=self._call_api, daemon=True).start()
 
     def _process_pdf(self, filename, content):
-        if PdfReader is None:
-            self.messages.append({
-                "role": "system",
-                "content": f"❌ Для чтения PDF требуется библиотека PyPDF2. Файл {filename} не может быть обработан."
-            })
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            self.messages.append({"role": "system", "content": f"❌ Для чтения PDF требуется библиотека pypdf. Файл {filename} не может быть обработан."})
             self.save_history()
             threading.Thread(target=self._call_api, daemon=True).start()
             return
@@ -921,34 +1472,50 @@ class Galya:
                 with open(content, 'rb') as f:
                     reader = PdfReader(f)
 
-            text = ""
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            if not text.strip():
-                text = "[Текст не найден в PDF]"
+            full_text = []
+            for page_num, page in enumerate(reader.pages, 1):
+                page_text = ""
+                # Стандартное извлечение
+                try:
+                    page_text = page.extract_text()
+                except:
+                    pass
+                # Альтернативный режим (если поддерживается)
+                if not page_text or len(page_text.strip()) < 10:
+                    try:
+                        page_text = page.extract_text(extraction_mode="layout")
+                    except:
+                        pass
+                # Аннотации
+                if not page_text or len(page_text.strip()) < 10:
+                    try:
+                        if hasattr(page, 'annotations') and page.annotations:
+                            for annot in page.annotations:
+                                if annot.get("/Contents"):
+                                    page_text += annot.get("/Contents", "") + " "
+                    except:
+                        pass
+                if page_text and page_text.strip():
+                    full_text.append(page_text.strip())
+                else:
+                    full_text.append(f"[Страница {page_num} не содержит текста]")
 
-            # Добавляем сообщение в историю
-            self.messages.append({
-                "role": "system",
-                "content": f"📄 Пользователь загрузил PDF файл {filename}. Содержимое:\n```\n{text}\n```"
-            })
-            self.save_history()
-            self.log(f"PDF файл {filename} обработан, текст добавлен в историю ({len(text)} символов)", "green")
+            result_text = "\n\n".join(full_text)
+            if not result_text.strip():
+                result_text = "[PDF не содержит текста. Возможно, это скан-копия.]"
 
-        except FileNotFoundError as e:
+            self._finalize_processing(filename, result_text)
+
+        except FileNotFoundError:
             self.messages.append({"role": "system", "content": f"❌ Файл {filename} не найден."})
             self.save_history()
             self.log(f"Ошибка PDF: файл не найден {filename}", "red")
+            threading.Thread(target=self._call_api, daemon=True).start()
         except Exception as e:
-            if "not allowed" in str(e).lower() or "password" in str(e).lower():
-                self.messages.append({"role": "system", "content": f"❌ PDF файл {filename} защищён паролем или повреждён. Не могу прочитать."})
-            else:
-                self.messages.append({"role": "system", "content": f"❌ Не удалось прочитать PDF {filename}: {e}"})
+            self.messages.append({"role": "system", "content": f"❌ Не удалось прочитать PDF {filename}: {str(e)}"})
             self.save_history()
             self.log(f"Ошибка PDF: {e}", "red")
-        threading.Thread(target=self._call_api, daemon=True).start()
+            threading.Thread(target=self._call_api, daemon=True).start()
 
     def read_url(self, url):
         headers = {
@@ -975,23 +1542,6 @@ class Galya:
         except Exception as e:
             pass
 
-    def extract_search_query(self, user_text: str) -> str:
-        import re
-        text = user_text.strip()
-        if not text:
-            return ""
-        patterns = [
-            r'(?:найди|поищи|ищу)\s+в\s+интернете\s*:\s*(.+)',
-            r'(?:найди|поищи|ищу)\s+в\s+сети\s*:\s*(.+)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                query = match.group(1).strip()
-                if query:
-                    return query
-        return ""
-
     def open_bookmark(self, name):
         bookmarks = load_bookmarks()
         name_lower = name.lower()
@@ -1002,24 +1552,32 @@ class Galya:
                     self.android_bridge.playOpen()
                     self.messages.append({"role": "system", "content": f"Открываю закладку {key}: {url}"})
                     self.save_history()
+                    threading.Thread(target=self._call_api, daemon=True).start()
                 return
         self.messages.append({"role": "system", "content": f"Закладка '{name}' не найдена."})
-        threading.Thread(target=self._call_api, daemon=True).start()
         self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
 
     def add_task(self, task_text):
         tasks = self.load_tasks()
         tasks.append({"id": len(tasks) + 1, "task": task_text, "done": False, "created": datetime.now().isoformat()})
         self.save_tasks(tasks)
+        self.messages.append({"role": "system", "content": f"✅ Задача добавлена: {task_text}"})
+        self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
 
     def list_tasks(self):
         tasks = self.load_tasks()
         if not tasks:
-            return "Список задач пуст"
-        output = "Твои задачи:\n"
-        for t in tasks:
-            status = "✅" if t["done"] else "⏳"
-            output += f"{status} [{t['id']}] {t['task']}\n"
+            output = "Список задач пуст"
+        else:
+            output = "Твои задачи:\n"
+            for t in tasks:
+                status = "✅" if t["done"] else "⏳"
+                output += f"{status} [{t['id']}] {t['task']}\n"
+        self.messages.append({"role": "system", "content": output})
+        self.save_history()
+        threading.Thread(target=self._call_api, daemon=True).start()
         return output
 
     def complete_task(self, task_id):
@@ -1028,6 +1586,9 @@ class Galya:
             if t["id"] == task_id:
                 t["done"] = True
                 self.save_tasks(tasks)
+                self.messages.append({"role": "system", "content": f"✅ Задача {task_id} отмечена выполненной."})
+                self.save_history()
+                threading.Thread(target=self._call_api, daemon=True).start()
                 return
 
     def read_file_from_disk(self, filepath):
@@ -1299,6 +1860,13 @@ class Galya:
             query = query.strip()
             if mark_executed("SEARCH", query):
                 self.process_search(query, "general")
+                need_api_call = True
+
+        # --- ПОИСК В БРАУЗЕРЕ (ЗАПАСНОЙ) ---
+        for query in re.findall(r'\[BROWSER_SEARCH\](.*?)\[/BROWSER_SEARCH\]', text, re.DOTALL):
+            query = query.strip()
+            if mark_executed("BROWSER_SEARCH", query):
+                self.google_search_and_extract(query)
                 need_api_call = True
 
         # --- ОТКРЫТИЕ ПРИЛОЖЕНИЯ ---
@@ -1681,9 +2249,11 @@ class Galya:
             translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
             self.messages.append({"role": "system", "content": f"Перевод ({target_lang}): {translated}"})
             self.save_history()
+            threading.Thread(target=self._call_api, daemon=True).start()
         except Exception as e:
             self.messages.append({"role": "system", "content": f"Ошибка перевода: {e}"})
             self.save_history()
+            threading.Thread(target=self._call_api, daemon=True).start()
 
     def _reminder(self, seconds, message):
         time.sleep(seconds)
@@ -1709,28 +2279,68 @@ class Galya:
         
         lower_input = user_text.lower()
         
-        if re.search(r'\bпривет\s*,?\s*дорогая\b', lower_input):
+        # Проверяем, что сообщение состоит ТОЛЬКО из фразы "привет дорогая" (с возможной запятой)
+        if re.fullmatch(r'привет\s*,?\s*дорогая', lower_input.strip()):
             if self.android_bridge and not self._greeting_played:
                 self.android_bridge.playGreeting()  
                 self._greeting_played = True
         
-        # Поиск в интернете
-        if any(kw in lower_input for kw in ['найди', 'поищи', 'ищу', 'поиск']):
+        # Создать заметку в приложении MIUI Notes (без разделителя)
+        if re.search(r'создай заметку\s+(.+)', user_text, re.IGNORECASE):
+            text = re.search(r'создай заметку\s+(.+)', user_text, re.IGNORECASE).group(1)
+            result = self.create_note_in_miui(text)
+            self.messages.append({"role": "system", "content": result})
+            self.save_history()
+            return
+
+        # Создать текстовый файл в папке Загрузки
+        if re.search(r'создай заметку в загрузках\s+(.+)', user_text, re.IGNORECASE):
+            text = re.search(r'создай заметку в загрузках\s+(.+)', user_text, re.IGNORECASE).group(1)
+            filename = f"заметка_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            result = self.create_text_file_in_downloads(filename, text)
+            self.messages.append({"role": "system", "content": result})
+            self.save_history()
+            return
+
+        # Включить трек
+        if re.search(r'включи трек\s+(.+)', user_text, re.IGNORECASE):
+            track = re.search(r'включи трек\s+(.+)', user_text, re.IGNORECASE).group(1)
+            result = self.play_track_in_miui(track)
+            self.messages.append({"role": "system", "content": result})
+            self.save_history()
+            return
+
+        # Открыть браузер и найти (запасной вариант)
+        if re.search(r'открой браузер и найди\s+(.+)', user_text, re.IGNORECASE):
+            query = re.search(r'открой браузер и найди\s+(.+)', user_text, re.IGNORECASE).group(1)
+            self.google_search_and_extract(query)
+            return
+
+        # Создать событие в календаре
+        if re.search(r'создай событие\s+(.+)', user_text, re.IGNORECASE):
+            title = re.search(r'создай событие\s+(.+)', user_text, re.IGNORECASE).group(1)
+            # Пока дата не передаётся, по умолчанию будет сегодняшняя
+            result = self.create_calendar_event(title, "сегодня")
+            self.messages.append({"role": "system", "content": result})
+            self.save_history()
+            return
+        
+        # Поиск в интернете через SearXNG (быстрый) - только если сказано "в интернете" или "в сети"
+        search_internet_match = re.search(r'(?:найди|поищи|ищу)\s+в\s+(?:интернете|сети)\s+(.+)', user_text, re.IGNORECASE)
+        if search_internet_match:
+            query = search_internet_match.group(1).strip()
             if self.android_bridge:
                 self.android_bridge.playSearch()
-            search_query = self.extract_search_query(user_text)
-            if search_query:
-                self.process_search(search_query, "general")
+            if query:
+                self.process_search(query, "general")
             else:
-                self.messages.append({"role": "system", "content": "Не поняла, что искать."})
+                self.messages.append({"role": "system", "content": "Не поняла, что искать в интернете."})
                 self.save_history()
                 self._call_api()
             return
         
         # Открыть приложение — СНАЧАЛА MIUI, ПОТОМ ПОИСК
         if any(kw in lower_input for kw in ['открой', 'открыть', 'запусти']):
-            if self.android_bridge:
-                self.android_bridge.playOpen()
             app_match = re.search(r'(?:открой|открыть|запусти)\s+(.+)', lower_input)
             if app_match:
                 app_name = app_match.group(1).strip().lower()
@@ -1891,3 +2501,16 @@ def process_message(user_text, activity):
         if galya_instance is None:
             galya_instance = Galya(API_KEY)
         galya_instance.process_message(user_text, activity)
+
+def get_conversation_history():
+    global galya_instance
+    if galya_instance is None:
+        return []
+    history = []
+    for msg in galya_instance.messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        # Показываем только сообщения пользователя и ассистента (не системные)
+        if role in ("user", "assistant") and isinstance(content, str):
+            history.append({"role": role, "content": content})
+    return history

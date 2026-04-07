@@ -2,88 +2,63 @@ package com.example.galya
 
 import android.content.Context
 import android.media.MediaPlayer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.TextToSpeech.OnInitListener
-import java.util.Locale
 import kotlin.random.Random
 
-class GalyaVoice(private val context: Context) : OnInitListener {
+class GalyaVoice(private val context: Context) {
 
-    private var tts: TextToSpeech? = null
-    private var isTtsReady = false
     private var currentMediaPlayer: MediaPlayer? = null
 
-    init {
-        tts = TextToSpeech(context, this)
-    }
-
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("ru", "RU"))
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts?.setLanguage(Locale.US)
-            }
-            isTtsReady = true
-        } else {
-            isTtsReady = false
-        }
-    }
-
     fun playGreeting() {
-        val randomNum = Random.nextInt(1, 5) // 1, 2, 3 или 4
-        val phraseKey = "dear$randomNum"
-        playSound(phraseKey)
+        val randomNum = Random.nextInt(1, 4)
+        val resId = context.resources.getIdentifier("dear$randomNum", "raw", context.packageName)
+        if (resId != 0) {
+            playSoundById(resId)
+        } else {
+            android.util.Log.e("GalyaVoice", "Файл dear$randomNum не найден")
+        }
     }
 
     fun playOpen() {
-        playSound("open")
+        playSoundById(context.resources.getIdentifier("open", "raw", context.packageName))
     }
 
     fun playSearch() {
-        playSound("search")
+        playSoundById(context.resources.getIdentifier("search", "raw", context.packageName))
     }
 
     fun playError() {
-        playSound("error")
+        playSoundById(context.resources.getIdentifier("error", "raw", context.packageName))
     }
 
     fun playDone() {
-        playSound("done")
+        playSoundById(context.resources.getIdentifier("done", "raw", context.packageName))
     }
 
     fun speak(phraseKey: String) {
-        playSound(phraseKey)
-    }
-
-    private fun playSound(phraseKey: String) {
+        // Если нужно проиграть конкретный ключ (например, "open", "search" и т.д.)
         val resId = context.resources.getIdentifier(phraseKey, "raw", context.packageName)
         if (resId != 0) {
-            try {
-                currentMediaPlayer?.release()
-                currentMediaPlayer = MediaPlayer.create(context, resId).also {
-                    it.setOnCompletionListener { mediaPlayer ->
-                        mediaPlayer.release()
-                        currentMediaPlayer = null
-                    }
-                    it.start()
-                }
-            } catch (e: Exception) {
-                speakFallback(phraseKey)
-            }
-        } else {
-            speakFallback(phraseKey)
+            playSoundById(resId)
         }
     }
 
-    private fun speakFallback(text: String) {
-        if (isTtsReady) {
-            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, null)
+    private fun playSoundById(resId: Int) {
+        if (resId == 0) return
+        try {
+            currentMediaPlayer?.release()
+            currentMediaPlayer = MediaPlayer.create(context, resId)
+            currentMediaPlayer?.setOnCompletionListener { mp ->
+                mp.release()
+                currentMediaPlayer = null
+            }
+            currentMediaPlayer?.start()
+        } catch (e: Exception) {
+            android.util.Log.e("GalyaVoice", "Ошибка воспроизведения", e)
         }
     }
 
     fun shutdown() {
         currentMediaPlayer?.release()
-        tts?.stop()
-        tts?.shutdown()
+        currentMediaPlayer = null
     }
 }

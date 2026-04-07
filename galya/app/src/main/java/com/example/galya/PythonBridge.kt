@@ -9,9 +9,67 @@ import android.widget.Toast
 import android.view.KeyEvent
 import android.os.Environment
 import java.io.File
+import java.io.FileOutputStream
 import androidx.core.content.FileProvider
+import com.chaquo.python.Python
 
 class PythonBridge(private val context: Context) {
+
+    fun accessibilityAction(command: String, vararg args: String): String {
+        val service = GalyaAccessibilityService.instance ?: return "ERROR: AccessibilityService not active"
+        return when (command) {
+            "launchApp" -> {
+                if (args.isNotEmpty()) {
+                    if (service.launchApp(args[0])) "OK: app launched" else "ERROR: cannot launch"
+                } else "ERROR: no package name"
+            }
+            "clickByText" -> {
+                if (args.isNotEmpty()) {
+                    val text = args[0]
+                    val partial = args.getOrNull(1)?.toBoolean() ?: false
+                    val node = service.findNodeByText(text, partial)
+                    if (node != null && service.performClick(node)) "OK: clicked on '$text'" else "ERROR: element '$text' not found"
+                } else "ERROR: no text"
+            }
+            "clickByContentDesc" -> {
+                if (args.isNotEmpty()) {
+                    val desc = args[0]
+                    val node = service.findNodeByContentDesc(desc)
+                    if (node != null && service.performClick(node)) "OK: clicked on '$desc'" else "ERROR: element '$desc' not found"
+                } else "ERROR: no description"
+            }
+            "clickByClass" -> {
+                if (args.isNotEmpty()) {
+                    val className = args[0]
+                    val node = service.findNodeByClassName(className)
+                    if (node != null && service.performClick(node)) "OK: clicked on class '$className'" else "ERROR: element class '$className' not found"
+                } else "ERROR: no class"
+            }
+            "inputFocused" -> {
+                if (args.isNotEmpty()) {
+                    val text = args[0]
+                    val focused = service.getFocusedNode()
+                    if (focused != null && service.inputText(focused, text)) "OK: input '$text'" else "ERROR: no focused element"
+                } else "ERROR: no text"
+            }
+            "inputByHint" -> {
+                if (args.size >= 2) {
+                    val hint = args[0]
+                    val text = args[1]
+                    val node = service.findNodeByHint(hint)
+                    if (node != null && service.inputText(node, text)) "OK: input '$text' into '$hint'" else "ERROR: element with hint '$hint' not found"
+                } else "ERROR: need hint and text"
+            }
+            "pressEnter" -> {
+                if (service.pressEnter()) "OK: pressed Enter" else "ERROR: cannot press Enter"
+            }
+            "getWindowText" -> service.getWindowText()
+            "goBack" -> {
+                if (service.goBack()) "OK: back" else "ERROR: cannot go back"
+            }
+            else -> "ERROR: unknown command '$command'"
+        }
+    }
 
     fun openApp(packageName: String) {
         try {
@@ -137,33 +195,79 @@ class PythonBridge(private val context: Context) {
             if (inputStream != null) {
                 val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
                 val galyaDir = File(picturesDir, "Galya")
-                if (!galyaDir.exists()) galyaDir.mkdirs()
+                if (!galyaDir.exists() && !galyaDir.mkdirs()) {
+                    addAssistantMessage("❌ Не удалось создать папку Galya")
+                    return
+                }
                 val fileName = "galya_${System.currentTimeMillis()}.jpg"
                 val file = File(galyaDir, fileName)
-                val outputStream = java.io.FileOutputStream(file)
+                val outputStream = FileOutputStream(file)
                 inputStream.copyTo(outputStream)
                 outputStream.close()
                 inputStream.close()
 
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                        put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Galya")
+                    }
+                    context.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                } else {
+                    android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+                }
+
+                val fileUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                (context as? MainActivity)?.addAssistantImage(fileUri.toString())
+            } else {
+                addAssistantMessage("🎨 Сгенерировано изображение: $url")
+            }
+        } catch (e: Exception) {
+            addAssistantMessage("❌ Ошибка сохранения изображения: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    fun saveBase64Image(base64Data: String, format: String) {
+        try {
+            val imageBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+            val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            if (bitmap == null) {
+                addAssistantMessage("❌ Не удалось декодировать base64 в изображение")
+                return
+            }
+            val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+            val galyaDir = File(picturesDir, "Galya")
+            if (!galyaDir.exists() && !galyaDir.mkdirs()) {
+                addAssistantMessage("❌ Не удалось создать папку Galya")
+                return
+            }
+            val fileName = "galya_${System.currentTimeMillis()}.${format}"
+            val file = File(galyaDir, fileName)
+            val outputStream = FileOutputStream(file)
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, outputStream)
+            outputStream.close()
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                 val values = android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, fileName)
                     put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                     put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Galya")
                 }
                 context.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-
-                val fileUri = androidx.core.content.FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    file
-                )
-                (context as? MainActivity)?.addAssistantImage(fileUri.toString())
             } else {
-                (context as? MainActivity)?.addAssistantMessage("🎨 Сгенерировано изображение: $url")
+                android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
             }
+
+            val fileUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            // Обновляем UI в главном потоке
+            (context as? MainActivity)?.runOnUiThread {
+                (context as? MainActivity)?.addAssistantImage(fileUri.toString())
+            }
+            addAssistantMessage("✅ Изображение сохранено: $fileName")
         } catch (e: Exception) {
+            addAssistantMessage("❌ Ошибка сохранения base64 изображения: ${e.message}")
             e.printStackTrace()
-            (context as? MainActivity)?.addAssistantMessage("❌ Ошибка сохранения изображения: ${e.message}")
         }
     }
 
@@ -172,6 +276,18 @@ class PythonBridge(private val context: Context) {
             val py = com.chaquo.python.Python.getInstance()
             val module = py.getModule("galya")
             module?.callAttr("process_uploaded_text", fileName, content)
+            addAssistantMessage("📄 Файл '$fileName' загружен, анализирую...")
+        } catch (e: Exception) {
+            addAssistantMessage("❌ Ошибка загрузки файла: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    fun sendBinaryFile(fileName: String, bytes: ByteArray) {
+        try {
+            val py = com.chaquo.python.Python.getInstance()
+            val module = py.getModule("galya")
+            module?.callAttr("process_uploaded_text", fileName, bytes)
             addAssistantMessage("📄 Файл '$fileName' загружен, анализирую...")
         } catch (e: Exception) {
             addAssistantMessage("❌ Ошибка загрузки файла: ${e.message}")
@@ -287,74 +403,38 @@ class PythonBridge(private val context: Context) {
     }
 
     fun playGreeting() {
-        try {
-            (context as? MainActivity)?.voice?.playGreeting()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.voice?.playGreeting()
     }
 
     fun playOpen() {
-        try {
-            (context as? MainActivity)?.voice?.playOpen()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.voice?.playOpen()
     }
 
     fun playSearch() {
-        try {
-            (context as? MainActivity)?.voice?.playSearch()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.voice?.playSearch()
     }
 
     fun playDone() {
-        try {
-            (context as? MainActivity)?.voice?.playDone()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.voice?.playDone()
     }
 
     fun playError() {
-        try {
-            (context as? MainActivity)?.voice?.playError()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.voice?.playError()
     }
 
     fun addAssistantMessage(text: String) {
-        try {
-            (context as? MainActivity)?.addAssistantMessage(text)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.addAssistantMessage(text)
     }
 
     fun onTaskCompleted() {
-        try {
-            (context as? MainActivity)?.onTaskCompleted()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.onTaskCompleted()
     }
 
     fun showImageFromUrl(url: String) {
-        try {
-            (context as? MainActivity)?.addAssistantImage(url)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.addAssistantImage(url)
     }
 
     fun onError(message: String) {
-        try {
-            (context as? MainActivity)?.onError(message)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        (context as? MainActivity)?.onError(message)
     }
 }

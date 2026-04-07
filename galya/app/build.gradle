@@ -27,8 +27,9 @@ android {
                 install "deep-translator"
                 install "wikipedia"
                 install "python-docx"
-                install "PyPDF2"
-                install "textract"             }
+                install "pypdf" 
+                install "olefile"   
+            }        
         }
     }
     

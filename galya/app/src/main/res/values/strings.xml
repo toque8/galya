@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Галя</string>
+    <string name="accessibility_service_description">Позволяет Гале управлять другими приложениями</string>
 </resources>

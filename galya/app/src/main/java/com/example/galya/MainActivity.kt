@@ -35,6 +35,32 @@ class MainActivity : AppCompatActivity() {
     private var pythonReady = false
     private var bridge: PythonBridge? = null
 
+    private fun loadHistoryFromGalya() {
+        try {
+            val py = Python.getInstance()
+            val module = py.getModule("galya")
+            val history = module.callAttr("get_conversation_history").asList()
+            messages.clear()
+            adapter.notifyDataSetChanged()
+            for (item in history) {
+                val map = item as Map<*, *>
+                val role = map["role"] as String
+                val content = map["content"] as String
+                if (role == "user") {
+                    messages.add(Message(content, true))
+                } else if (role == "assistant") {
+                    messages.add(Message(content, false))
+                }
+            }
+            adapter.notifyItemRangeInserted(0, messages.size)
+            if (messages.isNotEmpty()) {
+                recyclerView.scrollToPosition(messages.size - 1)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
     private val speechLauncher = registerForActivityResult(SpeechInputHelper()) { result ->
         try {
             if (result != null) {
@@ -57,15 +83,34 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "📷 Обрабатываю фото: $fileName", Toast.LENGTH_SHORT).show()
                     bridge?.sendImage(it.toString(), "")
                 } else {
-                    // Для текстовых файлов читаем содержимое
-                    Toast.makeText(this, "📎 Читаю файл: $fileName", Toast.LENGTH_SHORT).show()
-                    val inputStream = contentResolver.openInputStream(it)
-                    if (inputStream != null) {
-                        val content = inputStream.bufferedReader().use { reader -> reader.readText() }
-                        bridge?.sendTextFile(fileName, content)
-                        inputStream.close()
+                    // Определяем, текстовый ли файл (по MIME или расширению)
+                    val isText = mimeType?.startsWith("text/") == true ||
+                            fileName.endsWith(".txt") || fileName.endsWith(".py") ||
+                            fileName.endsWith(".json") || fileName.endsWith(".xml") ||
+                            fileName.endsWith(".html") || fileName.endsWith(".css") ||
+                            fileName.endsWith(".js") || fileName.endsWith(".md") ||
+                            fileName.endsWith(".csv") || fileName.endsWith(".log")
+                    if (isText) {
+                        Toast.makeText(this, "📎 Читаю текстовый файл: $fileName", Toast.LENGTH_SHORT).show()
+                        val inputStream = contentResolver.openInputStream(it)
+                        if (inputStream != null) {
+                            val content = inputStream.bufferedReader().use { reader -> reader.readText() }
+                            bridge?.sendTextFile(fileName, content)
+                            inputStream.close()
+                        } else {
+                            Toast.makeText(this, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
+                        }
                     } else {
-                        Toast.makeText(this, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
+                        // Для бинарных файлов (PDF, DOCX, DOC, аудио, видео) отправляем байты
+                        Toast.makeText(this, "📎 Обрабатываю бинарный файл: $fileName", Toast.LENGTH_SHORT).show()
+                        val inputStream = contentResolver.openInputStream(it)
+                        if (inputStream != null) {
+                            val bytes = inputStream.readBytes()
+                            bridge?.sendBinaryFile(fileName, bytes)
+                            inputStream.close()
+                        } else {
+                            Toast.makeText(this, "Не удалось открыть файл", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -128,6 +173,9 @@ class MainActivity : AppCompatActivity() {
             val py = Python.getInstance()
             val module = py.getModule("galya")
             module?.callAttr("set_bridge", bridge)
+            if (pythonReady) {
+                loadHistoryFromGalya()
+            }
             pythonReady = true
         } catch (e: Exception) {
             Toast.makeText(this, "Ошибка Python: ${e.message}", Toast.LENGTH_LONG).show()
@@ -242,18 +290,6 @@ class MainActivity : AppCompatActivity() {
         try {
             val text = editText.text.toString().trim()
             if (text.isEmpty()) return
-
-            when {
-                text.contains("привет", ignoreCase = true) || text.contains("дорогая", ignoreCase = true) -> {
-                    voice.playGreeting()
-                }
-                text.contains("найди", ignoreCase = true) || text.contains("поищи", ignoreCase = true) || text.contains("ищу", ignoreCase = true) -> {
-                    voice.playSearch()
-                }
-                text.contains("открой", ignoreCase = true) || text.contains("открыть", ignoreCase = true) -> {
-                    voice.playOpen()
-                }
-            }
 
             addUserMessage(text)
             editText.text.clear()
