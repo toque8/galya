@@ -1,12 +1,10 @@
 name: Build Android APK
 
-# Запуск workflow при пуше в main/master и возможность ручного запуска.
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
 
-# Оптимизация Gradle, чтобы сборка была быстрее.
 env:
   GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096M -Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
 
@@ -14,51 +12,43 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. Шаг: Клонируем код из репозитория
       - uses: actions/checkout@v4
 
-      # 2. Шаг: Устанавливаем Java. JDK 17 — последняя стабильная версия.
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # 3. Шаг: Настраиваем Android SDK и Gradle с правильным кэшированием.
-      # Это избавляет от большинства проблем с зависимостями.
-      - name: Setup Android SDK and Gradle
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # 4. Шаг: Кэшируем зависимости Gradle для ускорения сборки.
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('galya/**/*.gradle*', 'galya/**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # 5. Шаг: Даем права на выполнение gradlew скрипту.
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      # Переходим в папку проекта
+      - name: Grant execute permission
+        run: chmod +x galya/gradlew
 
-      # 6. Шаг: Команда сборки Debug APK. Это самая простая сборка.
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
-
-      - name: 🔧 Диагностика — найти APK
         run: |
-          echo "=== Ищем все APK в проекте ==="
-          find . -type f -name "*.apk"
-          echo -e "\n=== Содержимое стандартной папки outputs ==="
-          ls -la app/build/outputs/ || echo "Папки outputs нет"
-          ls -la app/build/outputs/apk/ || echo "Папки apk нет"
+          cd galya
+          ./gradlew assembleDebug --stacktrace
 
-      # 7. Шаг: Загружаем собранный APK как артефакт, чтобы его можно было скачать.
+      - name: 🔍 Find APK
+        run: |
+          echo "=== APK files ==="
+          find galya -name "*.apk"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: galya/app/build/outputs/apk/debug/app-debug.apk
