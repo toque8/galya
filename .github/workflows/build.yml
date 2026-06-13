@@ -46,7 +46,15 @@ jobs:
 
       # 6. Шаг: Команда сборки Debug APK. Это самая простая сборка.
       - name: Build Debug APK
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: 🔧 Диагностика — найти APK
+        run: |
+          echo "=== Ищем все APK в проекте ==="
+          find . -type f -name "*.apk"
+          echo -e "\n=== Содержимое стандартной папки outputs ==="
+          ls -la app/build/outputs/ || echo "Папки outputs нет"
+          ls -la app/build/outputs/apk/ || echo "Папки apk нет"
 
       # 7. Шаг: Загружаем собранный APK как артефакт, чтобы его можно было скачать.
       - name: Upload APK
