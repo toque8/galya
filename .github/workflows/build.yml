@@ -20,17 +20,11 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # Даём права на выполнение gradlew внутри папки galya
-      - name: Grant execute permission
-        run: chmod +x galya/gradlew
-
-      # Собираем APK (работаем внутри galya)
-      - name: Build Debug APK
+      - name: Build APK
         run: |
-          cd galya
-          ./gradlew assembleDebug --stacktrace
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
-      # Загружаем APK (путь внутри galya)
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
