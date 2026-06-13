@@ -5,9 +5,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-env:
-  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096M -Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,23 +20,17 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # Указываем, где искать gradlew
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      # Даём права на выполнение gradlew внутри папки galya
+      - name: Grant execute permission
+        run: chmod +x galya/gradlew
 
-      # Переходим в папку проекта и запускаем сборку
+      # Собираем APK (работаем внутри galya)
       - name: Build Debug APK
         run: |
           cd galya
-          ../gradlew assembleDebug --stacktrace
+          ./gradlew assembleDebug --stacktrace
 
-      # Диагностика: покажет, где лежит APK
-      - name: 🔍 Find APK
-        run: |
-          echo "=== APK files ==="
-          find . -name "*.apk"
-
-      # Загружаем APK из правильной папки
+      # Загружаем APK (путь внутри galya)
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
