@@ -45,7 +45,7 @@ TASKS_FILE = "/data/data/com.example.galya/files/tasks.json"
 BOOKMARKS_FILE = "/data/data/com.example.galya/files/bookmarks.json"
 UPLOAD_FOLDER = "/data/data/com.example.galya/files/uploads"
 BRAVE_API_KEY = None
-API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijg1NGNjZjFjLTliN2YtNGYzNS1iOWIxLTU2NWIxM2UyZTJiMiIsImlzRGV2ZWxvcGVyIjp0cnVlLCJpYXQiOjE3ODEzMzY5NTgsImV4cCI6MjA5NjkxMjk1OCwianRpIjoidWl5dlRtSklfaDZzd2pHNyJ9.ntIdNXgaWQ3fh0UL5-nxc22mrJt0J9gXQgOyAoGXaTg"
+API_KEY = 
 MAX_HISTORY_TOKENS_ESTIMATE = 150000
 
 session = requests.Session()
