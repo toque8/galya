@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import re
+import base64
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
@@ -37,14 +38,14 @@ def is_likely_binary(content_bytes, sample_size=1024):
 
 NAME = "Галя"
 API_URL = "https://bothub.chat/api/v2/openai/v1/chat/completions"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-4.6"
 HISTORY_FILE = "/data/data/com.example.galya/files/history.json"
 PROFILE_FILE = "/data/data/com.example.galya/files/profile.json"
 TASKS_FILE = "/data/data/com.example.galya/files/tasks.json"
 BOOKMARKS_FILE = "/data/data/com.example.galya/files/bookmarks.json"
 UPLOAD_FOLDER = "/data/data/com.example.galya/files/uploads"
 BRAVE_API_KEY = None
-API_KEY = 
+API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijg1NGNjZjFjLTliN2YtNGYzNS1iOWIxLTU2NWIxM2UyZTJiMiIsImlzRGV2ZWxvcGVyIjp0cnVlLCJpYXQiOjE3ODEzMzY5NTgsImV4cCI6MjA5NjkxMjk1OCwianRpIjoidWl5dlRtSklfaDZzd2pHNyJ9.ntIdNXgaWQ3fh0UL5-nxc22mrJt0J9gXQgOyAoGXaTg"
 MAX_HISTORY_TOKENS_ESTIMATE = 150000
 
 session = requests.Session()
